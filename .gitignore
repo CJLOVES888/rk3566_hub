@@ -1,0 +1,64 @@
+# ============================================================
+# .gitignore —— Git 忽略规则
+# ============================================================
+# 本地构建产物、临时文件、模型大文件等不入版本控制
+#
+# 提交到 GitHub 的应该只有：
+#   - CMakeLists.txt / *.pro
+#   - src/ 下的源文件
+#   - scripts/ 下的脚本
+#   - .gitignore / README
+#
+# 不应该提交的：
+#   - build/ 整个目录（编译产物）
+#   - models/*.rknn（大文件，用 LFS 或网盘分发）
+#   - .vs / .vscode / .idea（IDE 配置随人而异）
+#   - *.o / *.a / *.so / *.lo（编译中间产物）
+# ============================================================
+
+# ------- 构建产物 -------
+build/
+bin/
+*.o
+*.obj
+*.a
+*.so
+*.lo
+*.la
+*.la.lds
+*.so.*
+*.dylib
+
+# ------- Qt MOC / UIC 生成文件 -------
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# ------- IDE 配置 -------
+.vscode/
+.vs/
+.idea/
+*.user
+*.autosave
+*.swp
+*~
+
+# ------- 模型文件（大文件，用 LFS 或网盘） -------
+models/*.rknn
+models/*.onnx
+models/*.pt
+models/*.pth
+models/*.bin
+!models/.gitkeep
+
+# ------- 数据库 -------
+*.db
+*.db-shm
+*.db-wal
+data/*.db
+data/*.db-*
+
+# ------- 系统临时文件 -------
+.DS_Store
+Thumbs.db
+*.log
