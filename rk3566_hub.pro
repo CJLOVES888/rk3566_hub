@@ -7,6 +7,8 @@ SOURCES += \
     src/main.cpp \
     src/ui/main_window.cpp \
     src/vision/camera_worker.cpp \
+    src/vision/v4l2_mplane_capture.cpp \
+    src/vision/presence_guard.cpp \
     src/vision/detector.cpp \
     src/vision/rknn_engine.c \
     src/net/mqtt_client.cpp \
@@ -15,6 +17,8 @@ SOURCES += \
 HEADERS += \
     src/ui/main_window.h \
     src/vision/camera_worker.h \
+    src/vision/v4l2_mplane_capture.h \
+    src/vision/presence_guard.h \
     src/vision/detector.h \
     src/vision/rknn_engine.h \
     src/net/mqtt_client.h \

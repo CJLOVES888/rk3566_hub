@@ -132,6 +132,10 @@ bool Database::seedDefaults()
         {"mqtt_cmd_topic", "rk3566cmd"},
         {"mqtt_event_topic", "rk3566event"},
         {"npu_conf_threshold", "0.6"},
+        {"presence_enable", "1"},
+        {"presence_idle_sec", "30"},
+        {"presence_thresh", "0.025"},
+        {"presence_confirm", "3"},
     };
 
     for (const auto &d : defaults) {

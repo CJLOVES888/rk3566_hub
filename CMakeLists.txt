@@ -6,8 +6,8 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(rk3566_hub
-    VERSION 0.3
-    DESCRIPTION "RK3566 边缘 AI 智能安防中控终端"
+    VERSION 0.4
+    DESCRIPTION "RK3566 书桌/门口值守终端（帧差占用 + MQTT）"
     LANGUAGES C CXX
 )
 
@@ -53,6 +53,8 @@ add_executable(rk3566_hub
     src/main.cpp
     src/ui/main_window.cpp
     src/vision/camera_worker.cpp
+    src/vision/v4l2_mplane_capture.cpp
+    src/vision/presence_guard.cpp
     src/vision/detector.cpp
     src/vision/rknn_engine.c
     src/net/mqtt_client.cpp

@@ -24,6 +24,7 @@
 #include <algorithm>
 
 #include "vision/camera_worker.h"
+#include "vision/presence_guard.h"
 #include "net/mqtt_client.h"
 #include "net/protocol.h"
 #include "storage/database.h"
@@ -49,6 +50,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     initStorage();
     buildUi();
+    startPresence();
     startCamera();
     startDetector();
     startMqtt();
@@ -99,7 +101,7 @@ void MainWindow::buildUi()
     layout->setContentsMargins(20, 12, 20, 12);
     layout->setSpacing(8);
 
-    m_titleLabel = new QLabel(QStringLiteral("RK3566 智能中控"), this);
+    m_titleLabel = new QLabel(QStringLiteral("RK3566 书桌/门口值守"), this);
     m_titleLabel->setAlignment(Qt::AlignCenter);
     m_titleLabel->setStyleSheet(QStringLiteral(
         "font-size: 36px; font-weight: bold; color: #00d4ff;"));
@@ -116,7 +118,7 @@ void MainWindow::buildUi()
         "background-color: #000000; border: 1px solid #303030;"));
     stack->addWidget(m_videoLabel);
 
-    m_overlayLabel = new QLabel(QStringLiteral("屏幕已关闭\n(MQTT screen_off)"), stackHost);
+    m_overlayLabel = new QLabel(QStringLiteral("屏幕已关闭\n(无人超时 / 远程关屏)"), stackHost);
     m_overlayLabel->setAlignment(Qt::AlignCenter);
     m_overlayLabel->setStyleSheet(QStringLiteral(
         "background-color: #000000; color: #666666; font-size: 28px;"
@@ -134,6 +136,11 @@ void MainWindow::buildUi()
     m_mqttLabel->setAlignment(Qt::AlignCenter);
     m_mqttLabel->setStyleSheet(QStringLiteral("font-size: 18px; color: #888888;"));
     layout->addWidget(m_mqttLabel);
+
+    m_presenceLabel = new QLabel(QStringLiteral("值守: 初始化..."), this);
+    m_presenceLabel->setAlignment(Qt::AlignCenter);
+    m_presenceLabel->setStyleSheet(QStringLiteral("font-size: 18px; color: #888888;"));
+    layout->addWidget(m_presenceLabel);
 
     m_npuLabel = new QLabel(QStringLiteral("NPU: 未启动"), this);
     m_npuLabel->setAlignment(Qt::AlignCenter);
@@ -179,6 +186,57 @@ QString MainWindow::resolveModelPath() const
         }
     }
     return QString();
+}
+
+void MainWindow::startPresence()
+{
+    const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    auto &db = storage::Database::instance();
+
+    vision::PresenceConfig cfg;
+    const QString en = env.value(QStringLiteral("HUB_PRESENCE"),
+                                 db.getConfig(QStringLiteral("presence_enable"),
+                                              QStringLiteral("1")));
+    cfg.enabled = !(en == QLatin1String("0") || en.compare(QLatin1String("false"),
+                                                           Qt::CaseInsensitive) == 0);
+
+    cfg.idleMs = env.value(QStringLiteral("HUB_PRESENCE_IDLE_SEC"),
+                           db.getConfig(QStringLiteral("presence_idle_sec"),
+                                        QStringLiteral("30")))
+                     .toInt()
+                 * 1000;
+    cfg.motionRatio = env.value(QStringLiteral("HUB_PRESENCE_THRESH"),
+                                db.getConfig(QStringLiteral("presence_thresh"),
+                                             QStringLiteral("0.025")))
+                          .toDouble();
+    cfg.confirmHits = env.value(QStringLiteral("HUB_PRESENCE_CONFIRM"),
+                                db.getConfig(QStringLiteral("presence_confirm"),
+                                             QStringLiteral("3")))
+                          .toInt();
+
+    m_presence = new vision::PresenceGuard(cfg, this);
+    connect(m_presence, &vision::PresenceGuard::presenceNear,
+            this, &MainWindow::onPresenceNear);
+    connect(m_presence, &vision::PresenceGuard::presenceAway,
+            this, &MainWindow::onPresenceAway);
+    connect(m_presence, &vision::PresenceGuard::statusText,
+            this, &MainWindow::onPresenceStatus);
+
+    m_autoScreenFromPresence = cfg.enabled;
+    if (cfg.enabled) {
+        m_presenceLabel->setText(
+            QStringLiteral("值守: 监测中 | 静止 %1s 息屏 | 阈值 %2%")
+                .arg(cfg.idleMs / 1000)
+                .arg(cfg.motionRatio * 100.0, 0, 'f', 1));
+        m_presenceLabel->setStyleSheet(QStringLiteral("font-size: 18px; color: #66bb6a;"));
+        qInfo() << "PresenceGuard ON idleMs=" << cfg.idleMs
+                << "thresh=" << cfg.motionRatio
+                << "confirm=" << cfg.confirmHits;
+    } else {
+        m_presenceLabel->setText(QStringLiteral("值守: 已关闭 (HUB_PRESENCE=0)"));
+        m_presenceLabel->setStyleSheet(QStringLiteral("font-size: 18px; color: #888888;"));
+        qInfo() << "PresenceGuard OFF";
+    }
 }
 
 void MainWindow::startCamera()
@@ -370,6 +428,18 @@ void MainWindow::handleCommand(const QString &action, const QByteArray &raw)
         setScreenOn(true);
     } else if (action == QLatin1String("screen_off")) {
         setScreenOn(false);
+    } else if (action == QLatin1String("presence_on")
+               || action == QLatin1String("auto_on")) {
+        m_autoScreenFromPresence = true;
+        if (m_presence) {
+            m_presence->setEnabled(true);
+        }
+    } else if (action == QLatin1String("presence_off")
+               || action == QLatin1String("auto_off")) {
+        m_autoScreenFromPresence = false;
+        if (m_presence) {
+            m_presence->setEnabled(false);
+        }
     } else if (action == QLatin1String("query_status")) {
         /* ack 带状态 */
     } else if (action.isEmpty()) {
@@ -389,6 +459,9 @@ void MainWindow::logAndPublishAck(const QString &action, const QString &cmdId)
     payload.insert(QStringLiteral("action"), QStringLiteral("ack"));
     payload.insert(QStringLiteral("for"), action);
     payload.insert(QStringLiteral("screen_on"), m_screenOn);
+    payload.insert(QStringLiteral("presence"),
+                   m_presence && m_presence->isOccupied());
+    payload.insert(QStringLiteral("auto_presence"), m_autoScreenFromPresence);
     payload.insert(QStringLiteral("fps"), m_lastFps);
     payload.insert(QStringLiteral("device_id"), m_deviceId);
 
@@ -427,12 +500,85 @@ QImage MainWindow::drawBoxes(const QImage &frame) const
 
 void MainWindow::onFrame(const QImage &frame)
 {
+    // 息屏时仍要把帧送给值守检测，否则无法「来人亮屏」
+    if (m_presence) {
+        m_presence->onFrame(frame);
+    }
     if (!m_screenOn) {
         return;
     }
     const QImage shown = drawBoxes(frame);
     m_videoLabel->setPixmap(QPixmap::fromImage(shown).scaled(
         m_videoLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void MainWindow::publishPresenceEvent(const QString &action, double scoreOrIdle)
+{
+    QJsonObject payload;
+    payload.insert(QStringLiteral("action"), action);
+    payload.insert(QStringLiteral("device_id"), m_deviceId);
+    payload.insert(QStringLiteral("screen_on"), m_screenOn);
+    if (action == QLatin1String("person_near")) {
+        payload.insert(QStringLiteral("score"), scoreOrIdle);
+    } else {
+        payload.insert(QStringLiteral("idle_sec"), scoreOrIdle);
+    }
+    const QByteArray msg = net::buildMessage(QStringLiteral("event"), payload);
+    storage::Database::instance().logEvent(
+        action, QString::fromUtf8(msg), QStringLiteral("presence"));
+    if (m_mqtt && m_mqtt->isConnected()) {
+        m_mqtt->publishEvent(msg, 1);
+    }
+    qInfo() << "presence event" << action << scoreOrIdle;
+}
+
+void MainWindow::onPresenceNear(double score)
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // 防抖：3 秒内不重复推送
+    if (now - m_lastPresenceEventMs < 3000) {
+        if (m_autoScreenFromPresence) {
+            setScreenOn(true);
+        }
+        return;
+    }
+    m_lastPresenceEventMs = now;
+
+    if (m_autoScreenFromPresence) {
+        setScreenOn(true);
+    }
+    m_titleLabel->setText(QStringLiteral("有人靠近"));
+    QTimer::singleShot(2500, this, [this]() {
+        m_titleLabel->setText(QStringLiteral("RK3566 书桌/门口值守"));
+    });
+    publishPresenceEvent(QStringLiteral("person_near"), score);
+}
+
+void MainWindow::onPresenceAway(double idleSec)
+{
+    m_lastPresenceEventMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_autoScreenFromPresence) {
+        setScreenOn(false);
+        m_overlayLabel->setText(
+            QStringLiteral("屏幕已关闭\n(无人约 %1 秒)").arg(idleSec, 0, 'f', 0));
+    }
+    publishPresenceEvent(QStringLiteral("person_away"), idleSec);
+}
+
+void MainWindow::onPresenceStatus(const QString &text)
+{
+    if (!m_presenceLabel) {
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // 状态字每 500ms 刷新一次，避免刷屏
+    if (now - m_lastPresenceStatusMs < 500 && !text.contains(QStringLiteral("有人"))
+        && !text.contains(QStringLiteral("息屏"))) {
+        return;
+    }
+    m_lastPresenceStatusMs = now;
+    m_presenceLabel->setText(text);
+    m_presenceLabel->setStyleSheet(QStringLiteral("font-size: 18px; color: #66bb6a;"));
 }
 
 void MainWindow::onFps(double fps)
@@ -457,9 +603,9 @@ void MainWindow::onDetections(const QVector<vision::DetectBox> &boxes)
 void MainWindow::onPersonDetected(float conf)
 {
     setScreenOn(true);
-    m_titleLabel->setText(QStringLiteral("欢迎回家"));
+    m_titleLabel->setText(QStringLiteral("欢迎回家 (NPU)"));
     QTimer::singleShot(3000, this, [this]() {
-        m_titleLabel->setText(QStringLiteral("RK3566 智能中控"));
+        m_titleLabel->setText(QStringLiteral("RK3566 书桌/门口值守"));
     });
 
     QJsonObject payload;
@@ -549,6 +695,8 @@ void MainWindow::onPublishTestClicked()
     payload.insert(QStringLiteral("device_id"), m_deviceId);
     payload.insert(QStringLiteral("fps"), m_lastFps);
     payload.insert(QStringLiteral("screen_on"), m_screenOn);
+    payload.insert(QStringLiteral("presence"),
+                   m_presence && m_presence->isOccupied());
     const QByteArray msg = net::buildMessage(QStringLiteral("event"), payload);
     storage::Database::instance().logEvent(
         QStringLiteral("hello"), QString::fromUtf8(msg), QStringLiteral("ui"));
