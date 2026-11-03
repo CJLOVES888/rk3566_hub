@@ -46,7 +46,7 @@ MainWindow::MainWindow(QWidget *parent)
         "  padding: 10px 24px; font-size: 22px;"
         "}"
         "QPushButton:pressed { background-color: #2a5080; }"));
-    setWindowTitle(QStringLiteral("RK3566 Smart Hub"));
+    setWindowTitle(QStringLiteral("门扉哨"));
 
     initStorage();
     buildUi();
@@ -101,7 +101,7 @@ void MainWindow::buildUi()
     layout->setContentsMargins(20, 12, 20, 12);
     layout->setSpacing(8);
 
-    m_titleLabel = new QLabel(QStringLiteral("RK3566 书桌/门口值守"), this);
+    m_titleLabel = new QLabel(QStringLiteral("门扉哨"), this);
     m_titleLabel->setAlignment(Qt::AlignCenter);
     m_titleLabel->setStyleSheet(QStringLiteral(
         "font-size: 36px; font-weight: bold; color: #00d4ff;"));
@@ -518,18 +518,39 @@ void MainWindow::publishPresenceEvent(const QString &action, double scoreOrIdle)
     payload.insert(QStringLiteral("action"), action);
     payload.insert(QStringLiteral("device_id"), m_deviceId);
     payload.insert(QStringLiteral("screen_on"), m_screenOn);
+
+    // tip：手机端可读的中文提示（巴法云订阅 rk3566event 可见）
     if (action == QLatin1String("person_near")) {
         payload.insert(QStringLiteral("score"), scoreOrIdle);
+        payload.insert(QStringLiteral("level"), QStringLiteral("alert"));
+        payload.insert(
+            QStringLiteral("tip"),
+            QStringLiteral("【值守提醒】检测到有人靠近，终端已亮屏"));
+        payload.insert(
+            QStringLiteral("msg"),
+            QStringLiteral("有人靠近(运动强度 %1%)").arg(scoreOrIdle * 100.0, 0, 'f', 1));
     } else {
+        // person_away：长时间无人 → 应用息屏（非系统 suspend）
         payload.insert(QStringLiteral("idle_sec"), scoreOrIdle);
+        payload.insert(QStringLiteral("app_sleep"), true);
+        payload.insert(QStringLiteral("level"), QStringLiteral("info"));
+        payload.insert(
+            QStringLiteral("tip"),
+            QStringLiteral("【值守提醒】长时间无人经过，应用已息屏进入待机"));
+        payload.insert(
+            QStringLiteral("msg"),
+            QStringLiteral("无人约 %1 秒，终端应用息屏")
+                .arg(scoreOrIdle, 0, 'f', 0));
     }
+
     const QByteArray msg = net::buildMessage(QStringLiteral("event"), payload);
     storage::Database::instance().logEvent(
         action, QString::fromUtf8(msg), QStringLiteral("presence"));
     if (m_mqtt && m_mqtt->isConnected()) {
         m_mqtt->publishEvent(msg, 1);
     }
-    qInfo() << "presence event" << action << scoreOrIdle;
+    qInfo() << "presence event" << action << scoreOrIdle
+            << payload.value(QStringLiteral("tip")).toString();
 }
 
 void MainWindow::onPresenceNear(double score)
@@ -547,9 +568,9 @@ void MainWindow::onPresenceNear(double score)
     if (m_autoScreenFromPresence) {
         setScreenOn(true);
     }
-    m_titleLabel->setText(QStringLiteral("有人靠近"));
+    m_titleLabel->setText(QStringLiteral("有人靠近 · 已通知手机"));
     QTimer::singleShot(2500, this, [this]() {
-        m_titleLabel->setText(QStringLiteral("RK3566 书桌/门口值守"));
+        m_titleLabel->setText(QStringLiteral("门扉哨"));
     });
     publishPresenceEvent(QStringLiteral("person_near"), score);
 }
@@ -560,7 +581,8 @@ void MainWindow::onPresenceAway(double idleSec)
     if (m_autoScreenFromPresence) {
         setScreenOn(false);
         m_overlayLabel->setText(
-            QStringLiteral("屏幕已关闭\n(无人约 %1 秒)").arg(idleSec, 0, 'f', 0));
+            QStringLiteral("应用已息屏（待机）\n长时间无人约 %1 秒\n已通知手机")
+                .arg(idleSec, 0, 'f', 0));
     }
     publishPresenceEvent(QStringLiteral("person_away"), idleSec);
 }
@@ -605,7 +627,7 @@ void MainWindow::onPersonDetected(float conf)
     setScreenOn(true);
     m_titleLabel->setText(QStringLiteral("欢迎回家 (NPU)"));
     QTimer::singleShot(3000, this, [this]() {
-        m_titleLabel->setText(QStringLiteral("RK3566 书桌/门口值守"));
+        m_titleLabel->setText(QStringLiteral("门扉哨"));
     });
 
     QJsonObject payload;

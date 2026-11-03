@@ -1,11 +1,7 @@
 /*
  * ============================================================================
- * database.h —— QtSql + SQLite 本地持久化
+ * database.h —— Qt 封装：内部调用 hub_db（libsqlite3）
  * ----------------------------------------------------------------------------
- * 表：
- *   event_log  — 摄像头/MQTT/系统事件
- *   config     — 键值配置（替代硬编码）
- *
  * 用法：程序启动时 Database::instance().open(...) 一次；
  *       之后任意模块调用 logEvent / getConfig / setConfig。
  * ============================================================================
@@ -14,7 +10,6 @@
 #pragma once
 
 #include <QString>
-#include <QVariant>
 
 namespace storage {
 
@@ -42,10 +37,7 @@ private:
     Database(const Database &) = delete;
     Database &operator=(const Database &) = delete;
 
-    bool ensureSchema();
-    bool seedDefaults();
-
-    bool m_open = false;
+    void *m_db = nullptr; /* hub_db_t* */
 };
 
 } // namespace storage

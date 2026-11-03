@@ -1,29 +1,59 @@
 /*
  * ============================================================================
- * mqtt_client.cpp —— libmosquitto 实现
+ * mqtt_client.cpp —— Qt 信号槽 ↔ hub_mqtt
  * ============================================================================
  */
 
 #include "mqtt_client.h"
+#include "hub_mqtt.h"
 
 #include <QMetaObject>
-#include <QDebug>
+#include <QByteArray>
 
-#include <mosquitto.h>
+#include <cstdio>
+#include <cstring>
 
 namespace net {
+
+namespace {
+
+void copyField(char *dst, size_t dst_len, const QString &src)
+{
+    if (!dst || dst_len == 0) {
+        return;
+    }
+    const QByteArray utf8 = src.toUtf8();
+    std::snprintf(dst, dst_len, "%s", utf8.constData());
+}
+
+hub_mqtt_config_t toC(const MqttConfig &cfg)
+{
+    hub_mqtt_config_t c;
+    hub_mqtt_config_default(&c);
+    copyField(c.host, sizeof(c.host), cfg.host);
+    c.port = cfg.port;
+    copyField(c.client_id, sizeof(c.client_id), cfg.clientId);
+    copyField(c.username, sizeof(c.username), cfg.username);
+    copyField(c.password, sizeof(c.password), cfg.password);
+    copyField(c.cmd_topic, sizeof(c.cmd_topic), cfg.cmdTopic);
+    copyField(c.event_topic, sizeof(c.event_topic), cfg.eventTopic);
+    copyField(c.data_topic, sizeof(c.data_topic), cfg.dataTopic);
+    c.keepalive_sec = cfg.keepaliveSec;
+    return c;
+}
+
+} // namespace
 
 MqttClient::MqttClient(QObject *parent)
     : QObject(parent)
 {
-    // 进程级初始化一次即可；多次调用是安全的（引用计数）
-    mosquitto_lib_init();
+    hub_mqtt_lib_init();
 }
 
 MqttClient::~MqttClient()
 {
     stop();
-    mosquitto_lib_cleanup();
+    hub_mqtt_lib_cleanup();
 }
 
 void MqttClient::setConfig(const MqttConfig &cfg)
@@ -33,7 +63,7 @@ void MqttClient::setConfig(const MqttConfig &cfg)
 
 bool MqttClient::start()
 {
-    if (m_mosq) {
+    if (m_c) {
         return true;
     }
     if (m_cfg.clientId.isEmpty()) {
@@ -41,195 +71,97 @@ bool MqttClient::start()
         return false;
     }
 
-    m_mosq = mosquitto_new(m_cfg.clientId.toUtf8().constData(),
-                           /*clean_session=*/true,
-                           /*userdata=*/this);
-    if (!m_mosq) {
-        emit errorOccurred(QStringLiteral("mosquitto_new 失败"));
+    hub_mqtt_callbacks_t cbs;
+    std::memset(&cbs, 0, sizeof(cbs));
+    cbs.user = this;
+    cbs.on_connected = &MqttClient::onConnectedC;
+    cbs.on_disconnected = &MqttClient::onDisconnectedC;
+    cbs.on_message = &MqttClient::onMessageC;
+    cbs.on_error = &MqttClient::onErrorC;
+
+    const hub_mqtt_config_t c = toC(m_cfg);
+    m_c = hub_mqtt_create(&c, &cbs);
+    if (!m_c) {
+        emit errorOccurred(QStringLiteral("hub_mqtt_create 失败"));
         return false;
     }
-
-    mosquitto_connect_callback_set(m_mosq, &MqttClient::onConnectThunk);
-    mosquitto_disconnect_callback_set(m_mosq, &MqttClient::onDisconnectThunk);
-    mosquitto_message_callback_set(m_mosq, &MqttClient::onMessageThunk);
-    mosquitto_log_callback_set(m_mosq, &MqttClient::onLogThunk);
-
-    // 断线后 2s 起指数退避重连，上限 30s
-    mosquitto_reconnect_delay_set(m_mosq, 2, 30, true);
-
-    // 巴法云方式一：ClientId=UID 时用户名密码可空；方式二才需要 appID/secretKey
-    if (!m_cfg.username.isEmpty() || !m_cfg.password.isEmpty()) {
-        const int authRc = mosquitto_username_pw_set(
-            m_mosq,
-            m_cfg.username.isEmpty() ? "" : m_cfg.username.toUtf8().constData(),
-            m_cfg.password.isEmpty() ? nullptr : m_cfg.password.toUtf8().constData());
-        if (authRc != MOSQ_ERR_SUCCESS) {
-            emit errorOccurred(QStringLiteral("设置 MQTT 用户名失败: %1")
-                                   .arg(QString::fromUtf8(mosquitto_strerror(authRc))));
-            stop();
-            return false;
-        }
-    }
-
-    const int rc = mosquitto_connect_async(
-        m_mosq,
-        m_cfg.host.toUtf8().constData(),
-        m_cfg.port,
-        m_cfg.keepaliveSec);
-    if (rc != MOSQ_ERR_SUCCESS) {
-        emit errorOccurred(QStringLiteral("MQTT connect_async 失败: %1")
-                               .arg(QString::fromUtf8(mosquitto_strerror(rc))));
-        stop();
+    if (!hub_mqtt_start(static_cast<hub_mqtt_t *>(m_c))) {
+        hub_mqtt_destroy(static_cast<hub_mqtt_t *>(m_c));
+        m_c = nullptr;
         return false;
     }
-
-    const int loopRc = mosquitto_loop_start(m_mosq);
-    if (loopRc != MOSQ_ERR_SUCCESS) {
-        emit errorOccurred(QStringLiteral("MQTT loop_start 失败: %1")
-                               .arg(QString::fromUtf8(mosquitto_strerror(loopRc))));
-        stop();
-        return false;
-    }
-    m_loopStarted = true;
-
-    qInfo() << "MQTT connecting to" << m_cfg.host << m_cfg.port
-            << "cmd=" << m_cfg.cmdTopic;
     return true;
 }
 
 void MqttClient::stop()
 {
-    if (!m_mosq) {
+    if (!m_c) {
         return;
     }
-    if (m_loopStarted) {
-        mosquitto_loop_stop(m_mosq, /*force=*/true);
-        m_loopStarted = false;
-    }
-    mosquitto_disconnect(m_mosq);
-    mosquitto_destroy(m_mosq);
-    m_mosq = nullptr;
-    m_connected = false;
+    hub_mqtt_destroy(static_cast<hub_mqtt_t *>(m_c));
+    m_c = nullptr;
+}
+
+bool MqttClient::isConnected() const
+{
+    return hub_mqtt_is_connected(static_cast<const hub_mqtt_t *>(m_c)) != 0;
 }
 
 bool MqttClient::publish(const QString &topic, const QByteArray &payload, int qos)
 {
-    if (!m_mosq || !m_connected) {
+    if (!m_c) {
         emit errorOccurred(QStringLiteral("MQTT 未连接，无法发布"));
         return false;
     }
-    if (topic.isEmpty()) {
-        return false;
-    }
-
-    const int rc = mosquitto_publish(
-        m_mosq,
-        nullptr,
-        topic.toUtf8().constData(),
-        payload.size(),
-        payload.constData(),
-        qos,
-        /*retain=*/false);
-    if (rc != MOSQ_ERR_SUCCESS) {
-        emit errorOccurred(QStringLiteral("MQTT publish 失败: %1")
-                               .arg(QString::fromUtf8(mosquitto_strerror(rc))));
-        return false;
-    }
-    return true;
+    return hub_mqtt_publish(static_cast<hub_mqtt_t *>(m_c), topic.toUtf8().constData(),
+                            payload.constData(), payload.size(), qos) != 0;
 }
 
 bool MqttClient::publishEvent(const QByteArray &payload, int qos)
 {
-    return publish(m_cfg.eventTopic, payload, qos);
+    if (!m_c) {
+        return false;
+    }
+    return hub_mqtt_publish_event(static_cast<hub_mqtt_t *>(m_c), payload.constData(),
+                                  payload.size(), qos) != 0;
 }
 
 bool MqttClient::publishData(const QByteArray &payload, int qos)
 {
-    return publish(m_cfg.dataTopic, payload, qos);
+    if (!m_c) {
+        return false;
+    }
+    return hub_mqtt_publish_data(static_cast<hub_mqtt_t *>(m_c), payload.constData(),
+                                 payload.size(), qos) != 0;
 }
 
-void MqttClient::onConnectThunk(struct mosquitto * /*mosq*/, void *obj, int rc)
+void MqttClient::onConnectedC(void *user)
 {
-    auto *self = static_cast<MqttClient *>(obj);
-    QMetaObject::invokeMethod(self, [self, rc]() { self->handleConnect(rc); },
+    auto *self = static_cast<MqttClient *>(user);
+    QMetaObject::invokeMethod(self, [self]() { emit self->connected(); }, Qt::QueuedConnection);
+}
+
+void MqttClient::onDisconnectedC(void *user, int /*rc*/)
+{
+    auto *self = static_cast<MqttClient *>(user);
+    QMetaObject::invokeMethod(self, [self]() { emit self->disconnected(); }, Qt::QueuedConnection);
+}
+
+void MqttClient::onMessageC(void *user, const char *topic, const void *payload, int len)
+{
+    auto *self = static_cast<MqttClient *>(user);
+    const QString t = QString::fromUtf8(topic ? topic : "");
+    const QByteArray p(static_cast<const char *>(payload), len > 0 ? len : 0);
+    QMetaObject::invokeMethod(
+        self, [self, t, p]() { emit self->messageReceived(t, p); }, Qt::QueuedConnection);
+}
+
+void MqttClient::onErrorC(void *user, const char *message)
+{
+    auto *self = static_cast<MqttClient *>(user);
+    const QString msg = QString::fromUtf8(message ? message : "");
+    QMetaObject::invokeMethod(self, [self, msg]() { emit self->errorOccurred(msg); },
                               Qt::QueuedConnection);
-}
-
-void MqttClient::onDisconnectThunk(struct mosquitto * /*mosq*/, void *obj, int rc)
-{
-    auto *self = static_cast<MqttClient *>(obj);
-    QMetaObject::invokeMethod(self, [self, rc]() { self->handleDisconnect(rc); },
-                              Qt::QueuedConnection);
-}
-
-void MqttClient::onMessageThunk(struct mosquitto * /*mosq*/, void *obj,
-                                const struct ::mosquitto_message *msg)
-{
-    auto *self = static_cast<MqttClient *>(obj);
-    if (!msg || !msg->topic) {
-        return;
-    }
-    const QString topic = QString::fromUtf8(msg->topic);
-    const QByteArray payload(
-        static_cast<const char *>(msg->payload),
-        msg->payloadlen);
-    QMetaObject::invokeMethod(self,
-                              [self, topic, payload]() {
-                                  self->handleMessage(topic, payload);
-                              },
-                              Qt::QueuedConnection);
-}
-
-void MqttClient::onLogThunk(struct mosquitto * /*mosq*/, void * /*obj*/, int level,
-                            const char *str)
-{
-    // 只打 WARNING 及以上，避免刷屏；连接失败时这里最有用
-    if (level <= MOSQ_LOG_WARNING && str) {
-        qWarning() << "mosquitto:" << str;
-    }
-}
-
-void MqttClient::handleConnect(int rc)
-{
-    if (rc != 0) {
-        m_connected = false;
-        const char *reason = mosquitto_connack_string(rc);
-        qWarning() << "MQTT CONNACK failed rc=" << rc << reason;
-        emit errorOccurred(QStringLiteral("MQTT 连接被拒绝 rc=%1 (%2)")
-                               .arg(rc)
-                               .arg(QString::fromUtf8(reason ? reason : "")));
-        return;
-    }
-    m_connected = true;
-    qInfo() << "MQTT connected OK, subscribing" << m_cfg.cmdTopic;
-
-    if (!m_cfg.cmdTopic.isEmpty()) {
-        const int subRc = mosquitto_subscribe(
-            m_mosq, nullptr, m_cfg.cmdTopic.toUtf8().constData(), /*qos=*/1);
-        if (subRc != MOSQ_ERR_SUCCESS) {
-            emit errorOccurred(QStringLiteral("订阅 cmd 主题失败: %1")
-                                   .arg(QString::fromUtf8(mosquitto_strerror(subRc))));
-        } else {
-            qInfo() << "MQTT subscribed:" << m_cfg.cmdTopic;
-        }
-    }
-
-    emit connected();
-}
-
-void MqttClient::handleDisconnect(int rc)
-{
-    const bool was = m_connected;
-    m_connected = false;
-    qWarning() << "MQTT disconnected rc=" << rc;
-    if (was) {
-        emit disconnected();
-    }
-}
-
-void MqttClient::handleMessage(const QString &topic, const QByteArray &payload)
-{
-    emit messageReceived(topic, payload);
 }
 
 } // namespace net

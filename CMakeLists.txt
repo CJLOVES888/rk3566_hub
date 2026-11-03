@@ -1,13 +1,13 @@
 # ============================================================
 # CMakeLists.txt —— RK3566 智能中控终端
-# Qt + OpenCV 摄像头 + MQTT + SQLite + RKNN NPU（可选）
+# 值守终端：采集/通信/存储模块 + Qt 界面
 # ============================================================
 
 cmake_minimum_required(VERSION 3.16)
 
 project(rk3566_hub
-    VERSION 0.4
-    DESCRIPTION "RK3566 书桌/门口值守终端（帧差占用 + MQTT）"
+    VERSION 0.6
+    DESCRIPTION "RK3566 值守终端（门扉哨）"
     LANGUAGES C CXX
 )
 
@@ -22,10 +22,10 @@ set(CMAKE_AUTORCC ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Sql)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc videoio)
+find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MOSQUITTO REQUIRED IMPORTED_TARGET libmosquitto)
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
 
 # ---- RKNN Runtime（板子 /usr/lib/librknnrt.so）----
 option(HUB_ENABLE_RKNN "Link librknnrt for NPU inference" ON)
@@ -52,12 +52,21 @@ endif()
 add_executable(rk3566_hub
     src/main.cpp
     src/ui/main_window.cpp
+    # vision
+    src/vision/hub_v4l2_capture.c
+    src/vision/hub_presence.c
     src/vision/camera_worker.cpp
-    src/vision/v4l2_mplane_capture.cpp
     src/vision/presence_guard.cpp
     src/vision/detector.cpp
     src/vision/rknn_engine.c
+    # net
+    src/net/hub_mqtt.c
+    src/net/hub_protocol.c
     src/net/mqtt_client.cpp
+    src/net/protocol.cpp
+    # storage
+    src/storage/cJSON.c
+    src/storage/hub_db.c
     src/storage/database.cpp
 )
 
@@ -74,21 +83,19 @@ target_link_libraries(rk3566_hub PRIVATE
     Qt5::Core
     Qt5::Gui
     Qt5::Widgets
-    Qt5::Sql
-    ${OpenCV_LIBS}
     PkgConfig::MOSQUITTO
+    PkgConfig::SQLITE3
+    m
 )
 
 if(HUB_HAVE_RKNN)
     target_link_libraries(rk3566_hub PRIVATE ${RKNN_RT_LIB})
 endif()
 
-# C 源文件与数学库
-target_link_libraries(rk3566_hub PRIVATE m)
-
 target_compile_options(rk3566_hub PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra -Wpedantic>>
     $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:Clang>:-Wall -Wextra -Wpedantic>>
+    $<$<COMPILE_LANGUAGE:C>:$<$<CXX_COMPILER_ID:GNU>:-Wall -Wextra>>
 )
 
 include(GNUInstallDirs)
@@ -101,8 +108,8 @@ message(STATUS "============================================")
 message(STATUS "  RK3566 Hub — CMake Configuration")
 message(STATUS "============================================")
 message(STATUS "  Qt5:        ${Qt5Core_VERSION}")
-message(STATUS "  OpenCV:     ${OpenCV_VERSION}")
 message(STATUS "  mosquitto:  ${MOSQUITTO_VERSION}")
+message(STATUS "  sqlite3:    ${SQLITE3_VERSION}")
 message(STATUS "  HUB_HAVE_RKNN: ${HUB_HAVE_RKNN}")
 message(STATUS "  Output:     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "============================================")
